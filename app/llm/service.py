@@ -1,0 +1,240 @@
+"""
+SYSTEM ARCHITECTURE NOTES
+
+Pipeline:
+prompt → router → model → memory → response
+
+Model roles:
+- mistral → fast local model
+- qwen3:14b → complex local model
+- OpenAI (gpt-4.1-mini) → remote fallback / escalation
+
+Routing:
+- router.classify() decides simple vs complex
+- ask() maps that to local models by default
+
+Escalation:
+- local model always runs first
+- _should_escalate() decides if response quality is insufficient
+- if triggered → escalate to OpenAI model
+
+IMPORTANT:
+- router reasoning model (qwen) is LOCAL
+- escalation model (OpenAI) must be explicitly constructed
+- do NOT use router.get_reasoning_profile() for escalation
+"""
+
+from app.memory.store import MemoryStore
+from app.llm.router import LLMProvider, ModelProfile
+
+import uuid
+from app.memory.logger import ConversationLogger
+from app.llm.router import LLMRouter, TaskType
+from app.llm.client import LLMClient
+from app.config.settings import settings
+from app.memory.logger import ConversationLogger
+import requests
+
+class LLMService:
+    def __init__(self) -> None:
+        self.router = LLMRouter(
+            fast_model=settings.default_fast_model,
+            reasoning_model=settings.reasoning_model,
+        )
+        self.client = LLMClient()
+        self.logger = ConversationLogger()
+        self.memory = MemoryStore()
+
+    def run(self, task_type: str, prompt: str):
+        if task_type == "fast":
+            profile = self.router.get_fast_profile()
+
+        elif task_type == "reasoning":
+            profile = self.router.get_reasoning_profile()
+
+        else:
+            raise ValueError("Unsupported task type")
+
+        print(f"[Service] task_type={task_type}, profile={profile}")
+        response = self.client.run(profile, prompt)
+        content = response.content
+    
+        #log
+        self.logger.append(prompt, content)
+        
+        # store in vector DB
+        memory_text = content
+        self.memory.add(memory_text, str(uuid.uuid4()))
+
+        return content
+    
+    def _call_ollama(self, model, prompt):
+        url = "http://localhost:11434/api/generate"
+
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False
+        }
+
+        response = requests.post(url, json=payload)
+        return response.json()["response"] 
+
+    def _should_escalate(self, answer, task_type):
+        if task_type != TaskType.REASONING:
+            return False
+
+        answer_lower = answer.lower()
+        length = len(answer.strip())
+
+        # --- RULE 1: too short ---
+        if length < 700:
+            return True
+
+        # --- RULE 2: weak / uncertain language ---
+        weak_signals = [
+            "i'm not sure",
+            "i am not sure",
+            "insufficient information",
+            "not enough information",
+            "cannot determine",
+            "unclear",
+            "it depends"
+        ]
+
+        if any(signal in answer_lower for signal in weak_signals):
+            return True
+
+        # --- RULE 3: generic template response ---
+        generic_markers = [
+            "executive brief",
+            "key components",
+            "use cases",
+            "conclusion"
+        ]
+
+        generic_hits = sum(1 for marker in generic_markers if marker in answer_lower)
+
+        if generic_hits >= 4:
+            return True
+
+        return False
+      
+    def ask(self, prompt, model=None):
+        # --- STEP 1: ROUTE TASK ---
+        if model:
+            selected_model = model
+        else:
+            route = self.router.classify(prompt)
+            if route == "simple":
+                selected_model = "mistral"
+            else:
+                selected_model = "qwen3:14b"
+
+        route = "simple" if selected_model == "mistral" else "complex"
+        print(f"[Flow] prompt → router → model | route={route} model={selected_model}")
+
+                # --- STEP 2/3: MEMORY RETRIEVAL ---
+        if route == "simple":
+            recent_memories = []
+            selected_semantic = []
+
+            print("[Flow] simple route → memory skipped")
+
+        else:
+            recent_memories = self.memory.get_recent(limit=3)
+            print(f"[Flow] router → memory/tools | recent_count={len(recent_memories)}")
+
+            semantic_results = self.memory.search(prompt, limit=5)
+            print(f"[Flow] memory/tools → selection | semantic_raw={len(semantic_results)}")
+
+            top_semantic = semantic_results[:2]
+            loose_semantic = semantic_results[2:3]
+            selected_semantic = top_semantic + loose_semantic
+
+            print(f"[Flow] selection → prompt-build | selected_count={len(selected_semantic)}")
+
+        # --- STEP 4: BUILD CONTEXT ---
+        trimmed_recent = recent_memories[:2]
+        trimmed_semantic = selected_semantic[:2]
+
+        combined_memories = trimmed_recent + trimmed_semantic
+        memory_context = "\n".join(combined_memories)
+
+        # --- STEP 5: MODEL CALL ---
+        if selected_model in ["mistral", "qwen3:14b"]:
+            print(f"[Flow] model(local) | provider=ollama model={selected_model}")
+            content = self._call_ollama(selected_model, full_prompt).strip()
+
+            # --- OPTIONAL ESCALATION ---
+            if self._should_escalate(
+                content,
+                TaskType.REASONING if route == "complex" else TaskType.FAST,
+            ):
+                print("[Flow] escalation triggered → remote model")
+
+                profile = ModelProfile(
+                    provider=LLMProvider.OPENAI,
+                    model_name=settings.default_fast_model,
+                    purpose="escalation",
+                )
+
+                enhanced_prompt = f"""
+You are an expert assistant.
+
+The user request was:
+{prompt}
+
+Your task:
+- Provide a precise, fully developed answer
+- Avoid generic summaries
+- Be specific and actionable
+- Match the domain of the question
+
+Include:
+- Clear structure
+- Concrete details
+- If applicable, step-by-step logic or rules
+
+Context from memory, which may or may not be relevant:
+{memory_context}
+"""
+
+                response = self.client.run(profile, enhanced_prompt)
+                content = response.content.strip()
+                print("[Flow] final provider=remote")
+            else:
+                print("[Flow] final provider=local")
+
+        else:
+            print(f"[Flow] model(remote) | provider=openai model={selected_model}")
+
+            profile = ModelProfile(
+                provider=LLMProvider.OPENAI,
+                model_name=selected_model,
+                purpose="direct-remote",
+            )
+
+            response = self.client.run(profile, full_prompt)
+            content = response.content.strip()
+
+        print(f"[Flow] model → response | response_chars={len(content)}")
+
+        # --- STEP 6: OPTIONAL PARALLEL SIGNAL ---
+        parallel_note = ""
+        if route == "complex" and selected_semantic:
+            keywords = prompt.lower().split()
+            for mem in selected_semantic:
+                if any(k in mem.lower() for k in keywords):
+                    parallel_note = "Parallel: related prior pattern detected.\n\n"
+                    print("[Parallel] triggered")
+                    break
+
+        final_output = f"{parallel_note}{content}"
+
+        # --- STEP 7: STORE MEMORY ---
+        clean_content = content.replace("Parallel: related prior pattern detected.\n\n", "")
+        self.memory.add(clean_content)
+        print(f"[Memory-Write] stored_length={len(clean_content)} chars")
+
+        return final_output
