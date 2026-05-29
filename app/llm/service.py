@@ -161,6 +161,16 @@ class LLMService:
         combined_memories = trimmed_recent + trimmed_semantic
         memory_context = "\n".join(combined_memories)
 
+        if route == "simple" or not memory_context.strip():
+            full_prompt = prompt
+        else:
+            full_prompt = f"""Relevant memory:
+{memory_context}
+
+User request:
+{prompt}
+"""
+
         # --- STEP 5: MODEL CALL ---
         if selected_model in ["mistral", "qwen3:14b"]:
             print(f"[Flow] model(local) | provider=ollama model={selected_model}")
