@@ -105,17 +105,20 @@ class LLMService:
         if any(signal in answer_lower for signal in weak_signals):
             return True
 
-        # --- RULE 3: generic template response ---
-        generic_markers = [
-            "executive brief",
-            "key components",
-            "use cases",
-            "conclusion"
+        # --- RULE 3: obvious non-answer / refusal ---
+        non_answer_signals = [
+            "i can't answer",
+            "i cannot answer",
+            "i can't help with that",
+            "i cannot help with that",
+            "as an ai language model",
+            "i don't have access",
+            "no answer",
+            "error:",
+            "exception:"
         ]
 
-        generic_hits = sum(1 for marker in generic_markers if marker in answer_lower)
-
-        if generic_hits >= 4:
+        if any(signal in answer_lower for signal in non_answer_signals):
             return True
 
         return False
@@ -160,6 +163,14 @@ class LLMService:
 
         combined_memories = trimmed_recent + trimmed_semantic
         memory_context = "\n".join(combined_memories)
+        if memory_context:
+            full_prompt = f"""{prompt}
+
+Context from memory, which may or may not be relevant:
+{memory_context}
+"""
+        else:
+            full_prompt = prompt
 
         if route == "simple" or not memory_context.strip():
             full_prompt = prompt
