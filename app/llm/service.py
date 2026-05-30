@@ -64,7 +64,7 @@ class LLMService:
         
         # store in vector DB
         memory_text = content
-        self.memory.add(memory_text, str(uuid.uuid4()))
+        self.memory.add(memory_text, str(uuid.uuid4()), domain=self._detect_domain(prompt))
 
         return content
     
@@ -88,7 +88,7 @@ class LLMService:
         length = len(answer.strip())
 
         # --- RULE 1: too short ---
-        if length < 700:
+        if length < 300:
             return True
 
         # --- RULE 2: weak / uncertain language ---
@@ -122,6 +122,61 @@ class LLMService:
             return True
 
         return False
+
+    def _detect_domain(self, prompt: str) -> str:
+        prompt_lower = prompt.lower()
+
+        domain_keywords = {
+            "trading": [
+                "atr",
+                "breakout",
+                "candle",
+                "futures",
+                "hvn",
+                "lvn",
+                "market profile",
+                "order flow",
+                "price action",
+                "resistance",
+                "support",
+                "trade",
+                "trading",
+                "volume profile",
+                "vwap",
+            ],
+            "medicine": [
+                "diagnosis",
+                "disease",
+                "doctor",
+                "health",
+                "medical",
+                "medicine",
+                "patient",
+                "prescription",
+                "symptom",
+                "treatment",
+            ],
+            "build": [
+                "api",
+                "app",
+                "architecture",
+                "build",
+                "code",
+                "deploy",
+                "implementation",
+                "refactor",
+                "repo",
+                "service",
+                "software",
+                "test",
+            ],
+        }
+
+        for domain, keywords in domain_keywords.items():
+            if any(keyword in prompt_lower for keyword in keywords):
+                return domain
+
+        return "general"
       
     def ask(self, prompt, model=None):
         # --- STEP 1: ROUTE TASK ---
@@ -136,8 +191,11 @@ class LLMService:
 
         route = "simple" if selected_model == "mistral" else "complex"
         print(f"[Flow] prompt → router → model | route={route} model={selected_model}")
+        domain = self._detect_domain(prompt)
+        print(f"[Flow] domain detected | domain={domain}")
 
                 # --- STEP 2/3: MEMORY RETRIEVAL ---
+        background_memories = []
         if route == "simple":
             recent_memories = []
             selected_semantic = []
@@ -145,11 +203,23 @@ class LLMService:
             print("[Flow] simple route → memory skipped")
 
         else:
-            recent_memories = self.memory.get_recent(limit=3)
-            print(f"[Flow] router → memory/tools | recent_count={len(recent_memories)}")
+            if domain == "general":
+                recent_memories = self.memory.get_recent(limit=3)
+                semantic_results = self.memory.search(prompt, limit=5)
+                print(f"[Flow] router → memory/tools | domain=general recent_count={len(recent_memories)}")
+                print(f"[Flow] memory/tools → selection | semantic_raw={len(semantic_results)}")
+            else:
+                recent_memories = self.memory.get_recent(limit=3, domain=domain)
+                semantic_results = self.memory.search(prompt, limit=5, domain=domain)
+                background_results = self.memory.search(prompt, limit=3)
+                print(f"[Flow] router → memory/tools | domain={domain} recent_count={len(recent_memories)}")
+                print(f"[Flow] memory/tools → selection | same_domain_raw={len(semantic_results)}")
 
-            semantic_results = self.memory.search(prompt, limit=5)
-            print(f"[Flow] memory/tools → selection | semantic_raw={len(semantic_results)}")
+                same_domain_seen = set(recent_memories + semantic_results)
+                background_memories = [
+                    memory for memory in background_results if memory not in same_domain_seen
+                ][:1]
+                print(f"[Flow] memory/tools → background | optional_count={len(background_memories)}")
 
             top_semantic = semantic_results[:2]
             loose_semantic = semantic_results[2:3]
@@ -160,17 +230,26 @@ class LLMService:
         # --- STEP 4: BUILD CONTEXT ---
         trimmed_recent = recent_memories[:2]
         trimmed_semantic = selected_semantic[:2]
+        trimmed_background = background_memories[:1]
 
         combined_memories = trimmed_recent + trimmed_semantic
-        memory_context = "\n".join(combined_memories)
-        if memory_context:
-            full_prompt = f"""{prompt}
+        memory_sections = []
+        if combined_memories:
+            if domain == "general":
+                memory_sections.append(
+                    "Optional background memory context:\n" + "\n".join(combined_memories)
+                )
+            else:
+                memory_sections.append(
+                    f"Authoritative same-domain memory context ({domain}):\n"
+                    + "\n".join(combined_memories)
+                )
+        if trimmed_background:
+            memory_sections.append(
+                "Optional cross-domain background memory:\n" + "\n".join(trimmed_background)
+            )
 
-Context from memory, which may or may not be relevant:
-{memory_context}
-"""
-        else:
-            full_prompt = prompt
+        memory_context = "\n\n".join(memory_sections)
 
         if route == "simple" or not memory_context.strip():
             full_prompt = prompt
@@ -255,7 +334,7 @@ Context from memory, which may or may not be relevant:
 
         # --- STEP 7: STORE MEMORY ---
         clean_content = content.replace("Parallel: related prior pattern detected.\n\n", "")
-        self.memory.add(clean_content)
-        print(f"[Memory-Write] stored_length={len(clean_content)} chars")
+        self.memory.add(clean_content, domain=domain)
+        print(f"[Memory-Write] stored_length={len(clean_content)} chars domain={domain}")
 
         return final_output
