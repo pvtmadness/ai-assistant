@@ -24,6 +24,7 @@ IMPORTANT:
 - do NOT use router.get_reasoning_profile() for escalation
 """
 
+from app.agents.registry import create_default_agent_registry
 from app.memory.store import MemoryStore
 from app.llm.router import LLMProvider, ModelProfile
 
@@ -44,6 +45,7 @@ class LLMService:
         self.client = LLMClient()
         self.logger = ConversationLogger()
         self.memory = MemoryStore()
+        self.agent_registry = create_default_agent_registry()
 
     def run(self, task_type: str, prompt: str):
         if task_type == "fast":
@@ -305,6 +307,8 @@ class LLMService:
         print(f"[Flow] prompt → router → model | route={route} model={selected_model}")
         domain = self._detect_domain(prompt)
         print(f"[Flow] domain detected | domain={domain}")
+        agent = self.agent_registry.resolve(prompt, domain)
+        print(f"[Flow] domain → agent | agent={agent.name}")
 
         # --- STEP 2/3: MEMORY RETRIEVAL ---
         background_memories = []
@@ -365,35 +369,13 @@ class LLMService:
         trimmed_reference = reference_memories[:2]
         trimmed_background = background_memories[:1]
 
-        memory_sections = []
-        if trimmed_authoritative:
-            memory_sections.append(
-                f"Authoritative same-domain memory context ({domain}):\n"
-                + "\n".join(trimmed_authoritative)
-            )
-        if trimmed_reference:
-            label = "Reference same-domain memory context"
-            if domain == "general":
-                label = "Optional reference memory context"
-            memory_sections.append(
-                f"{label} ({domain}):\n" + "\n".join(trimmed_reference)
-            )
-        if trimmed_background:
-            memory_sections.append(
-                "Optional cross-domain background memory:\n" + "\n".join(trimmed_background)
-            )
-
-        memory_context = "\n\n".join(memory_sections)
-
-        if route == "simple" or not memory_context.strip():
-            full_prompt = prompt
-        else:
-            full_prompt = f"""Relevant memory:
-{memory_context}
-
-User request:
-{prompt}
-"""
+        full_prompt = agent.build_prompt(
+            user_prompt=prompt,
+            authoritative_memory=trimmed_authoritative,
+            reference_memory=trimmed_reference,
+            background_memory=trimmed_background,
+        )
+        memory_context = full_prompt if full_prompt != prompt else ""
 
         # --- STEP 5: MODEL CALL ---
         if selected_model in ["mistral", "qwen3:14b"]:
