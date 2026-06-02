@@ -9,7 +9,8 @@ def classify_task(user_input: str) -> str:
     keywords_complex = [
         "analyze", "compare", "evaluate", "strategy",
         "why", "how", "implication", "model",
-        "system", "improve", "optimize"
+        "system", "improve", "optimize", "build",
+        "framework", "architecture"
     ]
 
     for word in keywords_complex:
@@ -56,7 +57,7 @@ def route_request(user_input: str) -> dict:
     else:
         model = "qwen3:14b"
 
-    prompt = build_executive_prompt(user_input)
+    prompt = user_input
 
     return {
         "model": model,
