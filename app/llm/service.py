@@ -273,11 +273,28 @@ class LLMService:
         domain: str | None = None,
     ) -> str:
         domain = domain or self._detect_domain(prompt)
+        memory_write_policy = settings.memory_write_policy
+
+        if memory_write_policy == "disabled":
+            print(f"[Memory-Write] skipped policy=disabled domain={domain}")
+            return "disabled"
+
+        if memory_write_policy == "build_only" and domain != "build":
+            print(f"[Memory-Write] skipped policy=build_only domain={domain}")
+            return "build_only"
+
         memory_type = self._classify_memory_type(prompt, content, domain)
 
         if memory_type == "ephemeral":
             print(f"[Memory-Write] skipped memory_type=ephemeral domain={domain}")
             return memory_type
+
+        if memory_write_policy == "manual_review":
+            print(
+                f"[Memory-Write] pending_review domain={domain} "
+                f"memory_type={memory_type} chars={len(content)}"
+            )
+            return "manual_review"
 
         self.memory.add(
             content,
