@@ -85,6 +85,34 @@ class MarketImportCatalog:
             chroma_status=row[10],
         )
 
+    def list_imports(self) -> list[CatalogRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT import_id, source, symbol, timeframe, original_path, raw_path,
+                       processed_path, file_hash, row_count, imported_at, chroma_status
+                FROM market_imports
+                ORDER BY imported_at
+                """
+            ).fetchall()
+
+        return [
+            CatalogRecord(
+                import_id=row[0],
+                source=row[1],
+                symbol=row[2],
+                timeframe=row[3],
+                original_path=Path(row[4]),
+                raw_path=Path(row[5]),
+                processed_path=Path(row[6]),
+                file_hash=row[7],
+                row_count=row[8],
+                imported_at=datetime.fromisoformat(row[9]),
+                chroma_status=row[10],
+            )
+            for row in rows
+        ]
+
     def add_import(self, metadata: MarketImportMetadata) -> None:
         with self._connect() as conn:
             conn.execute(
