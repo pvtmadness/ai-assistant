@@ -114,6 +114,9 @@ def parse_timestamp(value: str) -> datetime:
     if not raw:
         raise CsvIngestError("Missing timestamp value")
 
+    if raw.isdigit():
+        return datetime.fromtimestamp(int(raw), tz=UTC)
+
     candidates = [
         raw,
         raw.replace("Z", "+00:00"),
